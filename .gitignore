@@ -1,0 +1,7 @@
+logs/
+raw/
+weights/
+*.zip
+*.pt
+!best.pt
+__pycache__/

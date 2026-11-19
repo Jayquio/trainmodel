@@ -2,18 +2,25 @@ import cv2, os, time, requests, numpy as np
 
 # ============== CONFIG ==============
 ESP32_IP = "192.168.254.136"     # only the IP, no http:// and no slashes
-TARGET = 150                     # photos per run
-INTERVAL = 2.5                   # seconds between photos (rest for the board)
-MAX_FAILS = 15                   # stop only after this many failures in a row
+INTERVAL = 2.5                   # seconds between photos (rest for the board, time to move things)
+MAX_FAILS = 15                   # stop a run only after this many failures in a row
 TIMEOUT = 10                     # seconds to wait for each photo
+
+# key -> (folder name, photos per run, label shown on screen, Roboflow action)
+MODES = {
+    ord('b'): ("bottle",     150, "BOTTLE",       "draw boxes"),
+    ord('g'): ("background",  40, "EMPTY TUNNEL", "mark Null"),
+    ord('n'): ("other",      120, "NOT BOTTLE",   "mark Null"),
+    ord('h'): ("hand",        30, "HAND",         "mark Null"),
+}
 # ====================================
 
 URL = f"http://{ESP32_IP}/capture"
 
 
-def count(lbl):
-    os.makedirs(f"raw/{lbl}", exist_ok=True)
-    return len(os.listdir(f"raw/{lbl}"))
+def count(folder):
+    os.makedirs(f"raw/{folder}", exist_ok=True)
+    return len(os.listdir(f"raw/{folder}"))
 
 
 def get_photo():
@@ -27,47 +34,59 @@ def get_photo():
         return None
 
 
-def make_screen(img, line1, line2):
+def make_screen(img, line1, line2, line3=""):
     screen = img.copy() if img is not None else np.zeros((240, 320, 3), np.uint8)
     cv2.putText(screen, line1, (5, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
     cv2.putText(screen, line2, (5, 38), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
+    if line3:
+        cv2.putText(screen, line3, (5, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
     return screen
 
 
-label = None          # None = waiting, otherwise "bottle" or "background"
-n = 0                 # file number for the current label
-session = 0           # photos taken in this run
+mode = None            # None = waiting, otherwise a key from MODES
+folder = ""
+n = 0                  # file number for the current folder
+session = 0            # photos taken in this run
+target = 0
 fails = 0
 last_try = 0
 last_img = None
 last_saved = None
 
-print("B = take 150 BOTTLE photos | G = take 150 BACKGROUND photos")
+print("B = bottle | G = empty tunnel | N = not-bottle items | H = hands")
 print("S = stop run | ESC = quit")
+print("In Roboflow: bottle photos get boxes, every other folder is marked Null.")
 
 while True:
-    if label is None:
-        screen = make_screen(last_img, "B = bottle   G = background", "ESC = quit")
+    if mode is None:
+        counts = "  ".join(f"{MODES[k][0][:3]}:{count(MODES[k][0])}" for k in MODES)
+        screen = make_screen(last_img, "B=bottle G=empty N=other H=hand", counts, "ESC = quit")
     else:
-        screen = make_screen(last_img, f"{label.upper()}  {session}/{TARGET}",
-                             f"fails in a row: {fails}   S = stop")
+        screen = make_screen(last_img,
+                             f"{MODES[mode][2]}  {session}/{target}",
+                             f"fails in a row: {fails}",
+                             "S = stop")
     cv2.imshow("capture", screen)
     key = cv2.waitKey(30) & 0xFF
+    if key != 255:
+        key = ord(chr(key).lower()) if 65 <= key <= 90 else key
 
-    if key == 27:                                     # ESC
+    if key == 27:                                   # ESC
         break
 
-    if label is None:
-        if key in (ord('b'), ord('g')):
-            label = "bottle" if key == ord('b') else "background"
-            n = count(label)
+    if mode is None:
+        if key in MODES:
+            mode = key
+            folder, target, _, action = MODES[mode][0], MODES[mode][1], MODES[mode][2], MODES[mode][3]
+            n = count(folder)
             session, fails, last_try = 0, 0, 0
-            print(f"Started {label}: taking {TARGET} photos. Move things around!")
+            last_saved = None
+            print(f"Started {folder}: up to {target} photos. Roboflow: {action}. Move things around!")
         continue
 
     if key == ord('s'):
-        print(f"Stopped. {session} {label} photos saved.")
-        label = None
+        print(f"Stopped. {session} photos saved to raw/{folder}/")
+        mode = None
         continue
 
     if time.time() - last_try >= INTERVAL:
@@ -78,8 +97,8 @@ while True:
             fails += 1
             if fails >= MAX_FAILS:
                 print("Board not responding. Close browser tabs, power-cycle it, "
-                      "use a 5V 2A wall adapter, then try again.")
-                label = None
+                      "use a 5V 2A supply, then try again.")
+                mode = None
             continue
 
         fails = 0
@@ -89,16 +108,16 @@ while True:
             print("  same frame as before, skipped")
             continue
 
-        path = f"raw/{label}/{label}_{n:04d}.jpg"
+        path = f"raw/{folder}/{folder}_{n:04d}.jpg"
         cv2.imwrite(path, img)
         n += 1
         session += 1
         last_img = img
         last_saved = img
-        print(f"saved {path}  ({session}/{TARGET})")
+        print(f"saved {path}  ({session}/{target})")
 
-        if session >= TARGET:
-            print(f"Done! {TARGET} {label} photos saved.")
-            label = None
+        if session >= target:
+            print(f"Done! {target} photos saved to raw/{folder}/")
+            mode = None
 
 cv2.destroyAllWindows()
